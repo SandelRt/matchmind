@@ -95,7 +95,7 @@ No human in the loop. The agent gets measurably better across every tournament r
 
 - Python 3.12+
 - Node.js 20+ (for MCP servers via npx)
-- Google Cloud project with Vertex AI enabled
+- Google Cloud project with Cloud Run enabled
 - Arize Phoenix Cloud account (free): https://app.phoenix.arize.com
 
 ### 1. Clone and install
@@ -237,7 +237,7 @@ Observable at every level:
 
 | Layer | Technology |
 |-------|-----------|
-| LLM | Gemini 2.0 Flash (Vertex AI) |
+| LLM | Gemini 2.0 Flash (Google AI Studio) |
 | Agent runtime | Google ADK 1.3.0 |
 | Observability | Arize Phoenix Cloud + OpenInference |
 | Live data | WC26 MCP (18 World Cup tools) |
