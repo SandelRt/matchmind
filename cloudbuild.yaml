@@ -1,17 +1,22 @@
+substitutions:
+  _REGION: us-central1
+  _SERVICE: matchmind
+  _AR_REPO: matchmind-repo
+
 steps:
-  # Build container image
+  # Build container image → Artifact Registry
   - name: "gcr.io/cloud-builders/docker"
     args:
       - build
       - -t
-      - "gcr.io/$PROJECT_ID/matchmind:$COMMIT_SHA"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
       - .
 
-  # Push to Container Registry
+  # Push to Artifact Registry
   - name: "gcr.io/cloud-builders/docker"
     args:
       - push
-      - "gcr.io/$PROJECT_ID/matchmind:$COMMIT_SHA"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
 
   # Deploy to Cloud Run
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -19,16 +24,10 @@ steps:
     args:
       - run
       - deploy
-      - matchmind
-      - --image=gcr.io/$PROJECT_ID/matchmind:$COMMIT_SHA
-      - --region=us-central1
+      - ${_SERVICE}
+      - "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
+      - "--region=${_REGION}"
       - --platform=managed
       - --allow-unauthenticated
       - --memory=1Gi
-      - --cpu=1
-      - --concurrency=80
-      - --set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID
-      - --set-secrets=PHOENIX_API_KEY=phoenix-api-key:latest
-
-images:
-  - "gcr.io/$PROJECT_ID/matchmind:$COMMIT_SHA"
+ 
