@@ -1,13 +1,21 @@
 """
 OpenInference instrumentation → Arize Phoenix Cloud.
 
-Captures ALL ADK spans automatically:
+Captures ALL spans automatically across two instrumentors:
+
+  GoogleADKInstrumentor (agent runtime):
   - LLM calls (prompt, completion, token counts, latency)
   - Tool calls (name, input, output, duration)
   - Agent steps (planning, execution, reflection)
-  - MCP tool invocations
+  - MCP tool invocations (Phoenix MCP + WC26 MCP)
 
-Every decision MatchMind makes is inspectable in Phoenix.
+  GoogleGenAIInstrumentor (direct Gemini calls):
+  - Self-improvement meta-prompting (SelfImprovementLoop)
+  - Gemini prompt rewrite calls (before/after prompt versions)
+  - Any google-genai SDK calls outside ADK context
+
+Together these give complete end-to-end tracing: every prediction
+decision AND every self-improvement cycle is visible in Phoenix.
 """
 import logging
 from opentelemetry import trace
@@ -16,6 +24,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from openinference.instrumentation.google_adk import GoogleADKInstrumentor
+from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
 from openinference.semconv.resource import ResourceAttributes
 
 logger = logging.getLogger("matchmind.tracing")
@@ -65,26 +74,10 @@ def setup_tracing(
     trace.set_tracer_provider(tracer_provider)
 
     # Auto-instrument Google ADK
-    # This patches ADK internals so every agent span is captured
-    # without manual instrumentation in tool code.
+    # Patches ADK internals — every agent span captured without
+    # manual instrumentation in tool code.
     GoogleADKInstrumentor().instrument()
 
-    _tracer_provider = tracer_provider
-    logger.info(
-        "Phoenix tracing active",
-        extra={"project": project_name, "endpoint": phoenix_base_url},
-    )
-    return tracer_provider
-
-
-def get_tracer(name: str = "matchmind") -> trace.Tracer:
-    """Get a named tracer for manual span creation."""
-    return trace.get_tracer(name)
-
-
-def shutdown_tracing() -> None:
-    """Flush all pending spans before shutdown."""
-    global _tracer_provider
-    if _tracer_provider:
-        _tracer_provider.shutdown()
-        logger.info("Tracing provider shut down, all spans flushed.")
+    # Auto-instrument google-genai SDK
+    # Captures direct Gemini calls made by the self-improvement loop
+    # (SelfImprovementL
