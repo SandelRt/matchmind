@@ -13,7 +13,7 @@ opentelemetry-exporter-otlp-proto-http>=1.25.0
 
 # ── API Server ────────────────────────────────────────────────────────────────
 fastapi==0.115.0
-uvicorn[standard]==0.30.6
+uvicorn[standard]>=0.34.0
 pydantic>=2.7.0
 
 # ── HTTP / Async ──────────────────────────────────────────────────────────────
