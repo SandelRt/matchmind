@@ -81,3 +81,11 @@ def setup_tracing(
     # Auto-instrument google-genai SDK
     # Captures direct Gemini calls made by the self-improvement loop
     # (SelfImprovementL
+
+
+def shutdown_tracing() -> None:
+    """Flush and shut down the global TracerProvider."""
+    global _tracer_provider
+    if _tracer_provider is not None:
+        _tracer_provider.shutdown()
+        _tracer_provider = None

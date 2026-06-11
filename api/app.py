@@ -53,11 +53,7 @@ async def lifespan(app: FastAPI):
     logger.info("ADK agent initialized (model: %s)", config.GEMINI_MODEL)
 
     # 3. Build improvement loop dependencies
-    gemini = genai.Client(
-        vertexai=True,
-        project=config.GOOGLE_CLOUD_PROJECT,
-        location=config.GOOGLE_CLOUD_LOCATION,
-    )
+    gemini = genai.Client()
     evaluator = MatchPredictionEvaluator()
 
     # Build Phoenix REST tool callables for the improvement loop.
