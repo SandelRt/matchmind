@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>MatchMind — Self-Improving World Cup Intelligence</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:       #0a0e1a;
+    --surface:  #111827;
+    --card:     #1a2235;
+    --border:   #1e2d45;
+    --accent:   #3b82f6;
+    --accent2:  #10b981;
+    --warn:     #f59e0b;
+    --danger:   #ef4444;
+    --text:     #e2e8f0;
+    --muted:    #64748b;
+    --phoenix:  #9333ea;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* ── Layout ───────────────────────────────────────────────────────────── */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .logo { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); }
+  .badge {
+    background: var(--phoenix);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 99px;
+    letter-spacing: 0.5px;
+  }
+  .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent2);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; } 50% { opacity: 0.4; }
+  }
+
+  .container { max-width: 1280px; margin: 0 auto; padding: 28px 32px; }
+
+  /* ── KPI strip ────────────────────────────────────────────────────────── */
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+  .kpi {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    position: relative;
+    overflow: hidden;
+  }
+  .kpi::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+  .kpi.blue::before  { background: var(--accent); }
+  .kpi.green::before { background: var(--accent2); }
+  .kpi.amber::before { background: var(--warn); }
+  .kpi.purple::before{ background: var(--phoenix); }
+
+  .kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; }
+  .kpi-value { font-size: 32px; font-weight: 700; letter-spacing: -1px; }
+  .kpi-sub   { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .kpi-delta {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-top: 6px;
+  }
+  .delta-up   { background: rgba(16,185,129,0.15); color: var(--accent2); }
+  .delta-down { background: rgba(239,68,68,0.15);  color: var(--danger); }
+
+  /* ── Grid ─────────────────────────────────────────────────────────────── */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+  .grid-3 {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+  }
+  .card-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--muted);
+    margin-bottom: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-title .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* ── Chart containers ─────────────────────────────────────────────────── */
+  .chart-wrap { position: relative; height: 220px; }
+
+  /* ── Prediction feed ─────────────────────────────────────────────────── */
+  .pred-list { display: flex; flex-direction: column; gap: 10px; }
+  .pred-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+  }
+  .pred-match { font-weight: 600; font-size: 13px; }
+  .pred-meta  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .pred-score {
+    font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
+    color: var(--accent);
+  }
+  .pred-conf  { font-size: 11px; color: var(--muted); text-align: right; }
+  .outcome-badge {
+    font-size: 10px; font-weight: 700; padding: 3px 8px;
+    border-radius: 4px; letter-spacing: 0.5px;
+  }
+  .correct   { background: rgba(16,185,129,0.15); color: var(--accent2); }
+  .incorrect { background: rgba(239,68,68,0.15);  color: var(--danger); }
+  .pending   { background: rgba(59,130,246,0.15); color: var(--accent); }
+
+  /* ── Improvement log ─────────────────────────────────────────────────── */
+  .log-list  { display: flex; flex-direction: column; gap: 10px; max-height: 280px; overflow-y: auto; }
+  .log-item  {
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .log-item:last-child { border-bottom: none; }
+  .log-icon  {
+    width: 28px; height: 28px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; flex-shrink: 0;
+  }
+  .log-icon.loop   { background: rgba(147,51,234,0.2); }
+  .log-icon.eval   { background: rgba(59,130,246,0.2); }
+  .log-icon.deploy { background: rgba(16,185,129,0.2); }
+  .log-body  { flex: 1; }
+  .log-title { font-size: 12px; font-weight: 600; }
+  .log-desc  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .log-time  { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+  /* ── Prompt version table ─────────────────────────────────────────────── */
+  .version-table { width: 100%; border-collapse: collapse; }
+  .version-table th {
+    text-align: left; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.7px; color: var(--muted); padding: 0 0 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .version-table td {
+    padding: 10px 0;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .version-table tr:last-child td { border-bottom: none; }
+  .version-pill {
+    background: rgba(59,130,246,0.15); color: var(--accent);
+    font-size: 10px; font-weight: 700; padding: 2px 7px;
+    border-radius: 4px; font-family: monospace;
+  }
+  .version-pill.active {
+    background: rgba(16,185,129,0.15); color: var(--accent2);
+  }
+  .bar-wrap { height: 6px; background: var(--border); border-radius: 99px; width: 80px; }
+  .bar-fill { height: 100%; border-radius: 99px; background: var(--accent2); }
+
+  /* ── Chat ──────────────────────────────────────────────────────────────── */
+  .chat-wrap {
+    display: flex; flex-direction: column;
+    height: 320px;
+  }
+  .messages {
+    flex: 1; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 10px;
+    padding-right: 4px;
+    margin-bottom: 14px;
+  }
+  .msg {
+    max-width: 85%;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--accent);
+    color: #fff;
+    border-bottom-right-radius: 2px;
+  }
+  .msg.agent {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 2px;
+  }
+  .msg.agent .msg-meta { font-size: 10px; color: var(--muted); margin-top: 4px; }
+  .chat-input-row {
+    display: flex; gap: 10px;
+  }
+  .chat-input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .chat-input:focus { border-color: var(--accent); }
+  .chat-send {
+    background: var(--accent);
+    border: none; color: #fff;
+    padding: 10px 18px; border-radius: 8px;
+    font-weight: 600; cursor: pointer; font-size: 13px;
+    transition: opacity 0.2s;
+  }
+  .chat-send:hover { opacity: 0.85; }
+  .chat-send:disabled { opacity: 0.4; cursor: default; }
+
+  /* ── Spinner ─────────────────────────────────────────────────────────── */
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: inline-block; vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Phoenix banner ──────────────────────────────────────────────────── */
+  .phoenix-banner {
+    background: linear-gradient(135deg, rgba(147,51,234,0.15), rgba(59,130,246,0.15));
+    border: 1px solid rgba(147,51,234,0.3);
+    border-radius: 10px;
+    padding: 14px 20px;
+    margin-bottom: 20px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .phoenix-banner .ph-icon { font-size: 22px; }
+  .phoenix-banner .ph-text { flex: 1; font-size: 12px; color: var(--muted); }
+  .phoenix-banner .ph-text strong { color: var(--text); }
+  .phoenix-link {
+    font-size: 11px; color: var(--phoenix); text-decoration: none;
+    border: 1px solid rgba(147,51,234,0.4); padding: 5px 12px;
+    border-radius: 6px; white-space: nowrap;
+  }
+  .phoenix-link:hover { background: rgba(147,51,234,0.1); }
+
+  /* ── Scrollbar ─────────────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <span class="logo">Match<span>Mind</span></span>
+  <span class="badge">ARIZE PHOENIX</span>
+  <span style="color:var(--muted);font-size:12px;">World Cup 2026 · Self-Improving Prediction Agent</span>
+  <div class="header-right">
+    <div class="status-dot"></div>
+    <span style="font-size:12px;color:var(--muted);">Live</span>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Phoenix Banner -->
+  <div class="phoenix-banner">
+    <div class="ph-icon">🔮</div>
+    <div class="ph-text">
+      <strong>Powered by Arize Phoenix</strong> — every prediction is traced, evaluated,
+      and fed back into a self-improvement loop. The agent rewrites its own instructions
+      based on its failure patterns. No human in the loop.
+    </div>
+    <a href="https://app.phoenix.arize.com" target="_blank" class="phoenix-link">
+      View Traces →
+    </a>
+  </div>
+
+  <!-- KPI Strip -->
+  <div class="kpis">
+    <div class="kpi blue">
+      <div class="kpi-label">Total Predictions</div>
+      <div class="kpi-value" id="kpi-total">—</div>
+      <div class="kpi-sub">Matches analysed this tournament</div>
+    </div>
+    <div class="kpi green">
+      <div class="kpi-label">Accuracy Rate</div>
+      <div class="kpi-value" id="kpi-accuracy">—</div>
+      <div class="kpi-delta delta-up" id="kpi-delta">↑ Improving</div>
+    </div>
+    <div class="kpi amber">
+      <div class="kpi-label">Improvement Cycles</div>
+      <div class="kpi-value" id="kpi-cycles">—</div>
+      <div class="kpi-sub">Self-improvement loop runs</div>
+    </div>
+    <div class="kpi purple">
+      <div class="kpi-label">Active Prompt Version</div>
+      <div class="kpi-value" id="kpi-version" style="font-size:20px;margin-top:4px;">—</div>
+      <div class="kpi-sub">Auto-generated by Gemini</div>
+    </div>
+  </div>
+
+  <!-- Accuracy Chart + Prompt Version Performance -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title"><span class="dot"></span>Accuracy Over Time (by Prompt Version)</div>
+      <div class="chart-wrap">
+        <canvas id="accuracyChart"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="dot" style="background:var(--phoenix)"></span>Prompt Version Performance</div>
+      <table class="version-table">
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>Predictions</th>
+            <th>Accuracy</th>
+            <th style="width:90px">Score</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="versionTable">
+          <tr><td colspan="5" style="color:var(--muted);padding:16px 0;">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Predictions Feed + Improvement Log -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title"><span class="dot" style="background:var(--accent2)"></span>Recent Predictions</div>
+      <div class="pred-list" id="predList">
+        <div style="color:var(--muted);font-size:12px;">No predictions yet. Make your first prediction below.</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="dot" style="background:var(--phoenix)"></span>Improvement Loop Activity</div>
+      <div class="log-list" id="logList">
+        <div class="log-item">
+          <div class="log-icon loop">🔄</div>
+          <div class="log-body">
+            <div class="log-title">System initialised</div>
+            <div class="log-desc">Tracing active → Arize Phoenix Cloud. Waiting for first predictions.</div>
+          </div>
+          <div class="log-time">just now</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat + Calibration breakdown -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title"><span class="dot" style="background:var(--warn)"></span>Ask MatchMind</div>
+      <div class="chat-wrap">
+        <div class="messages" id="messages">
+          <div class="msg agent">
+            Hello! I'm MatchMind, your self-improving World Cup 2026 prediction agent.
+            Ask me to predict any upcoming match, or ask how I've been performing.
+            I can even explain why I got a prediction wrong — I check my own traces!
+            <div class="msg-meta">Powered by Gemini · Traced by Arize Phoenix</div>
+          </div>
+        </div>
+        <div class="chat-input-row">
+          <input class="chat-input" id="chatInput"
+            placeholder="e.g. Predict Brazil vs Argentina, or: Why did I fail last time?"
+            onkeydown="if(event.key==='Enter')sendChat()"/>
+          <button class="chat-send" id="sendBtn" onclick="sendChat()">Send</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="dot" style="background:var(--danger)"></span>Failure Analysis</div>
+      <div class="chart-wrap">
+        <canvas id="failureChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+const API = '';  // same origin
+let sessionId = 'session_' + Math.random().toString(36).slice(2,8);
+let accuracyHistory  = [];
+let versionData      = [];
+let predictions      = [];
+let improvementLogs  = [];
+
+// ── Chart.js setup ────────────────────────────────────────────────────────────
+Chart.defaults.color = '#64748b';
+Chart.defaults.borderColor = '#1e2d45';
+Chart.defaults.font.family = 'Inter, system-ui, sans-serif';
+Chart.defaults.font.size = 11;
+
+const accuracyChart = new Chart(
+  document.getElementById('accuracyChart').getContext('2d'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: 'Accuracy %',
+      data: [],
+      borderColor: '#3b82f6',
+      backgroundColor: 'rgba(59,130,246,0.08)',
+      borderWidth: 2,
+      pointRadius: 4,
+      pointBackgroundColor: '#3b82f6',
+      tension: 0.4,
+      fill: true,
+    },{
+      label: 'After Improvement',
+      data: [],
+      borderColor: '#10b981',
+      backgroundColor: 'rgba(16,185,129,0.06)',
+      borderWidth: 2,
+      borderDash: [4,4],
+      pointRadius: 0,
+      tension: 0.4,
+      fill: false,
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    scales: {
+      y: { min: 0, max: 100, ticks: { callback: v => v+'%' }, grid: { color: '#1e2d45' } },
+      x: { grid: { display: false } }
+    },
+    plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 10, padding: 14 } } }
+  }
+});
+
+const failureChart = new Chart(
+  document.getElementById('failureChart').getContext('2d'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Overconfident','Missing Injury Data','Low Tool Usage','Shallow Reasoning'],
+    datasets: [{
+      data: [0, 0, 0, 0],
+      backgroundColor: ['#ef4444','#f59e0b','#6366f1','#ec4899'],
+      borderWidth: 0, hoverOffset: 4,
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: {
+      legend: { position: 'bottom', labels: { boxWidth: 10, padding: 12, font: { size: 10 } } }
+    }
+  }
+});
+
+// ── Seed demo data ─────────────────────────────────────────────────────────────
+function seedDemoData() {
+  const demoMatches = [
+    { m:'Brazil vs Mexico',      p:'2-0', a:'2-1', c:0.72, v:'v1',            ok:true  },
+    { m:'France vs Argentina',   p:'1-1', a:'2-0', c:0.68, v:'v1',            ok:false },
+    { m:'Germany vs Spain',      p:'1-2', a:'1-2', c:0.61, v:'v1',            ok:true  },
+    { m:'England vs Portugal',   p:'2-1', a:'0-1', c:0.80, v:'v1',            ok:false },
+    { m:'Netherlands vs Croatia',p:'2-0', a:'2-0', c:0.65, v:'v20260609_1430',ok:true  },
+    { m:'Japan vs Morocco',      p:'1-0', a:'1-0', c:0.58, v:'v20260609_1430',ok:true  },
+    { m:'USA vs Mexico',         p:'1-1', a:'2-1', c:0.55, v:'v20260610_0900',ok:false, pending:true },
+  ];
+
+  predictions = demoMatches;
+  renderPredictions();
+
+  // Accuracy by prediction index
+  const accs = [], accsPost = [];
+  let correct = 0;
+  demoMatches.forEach((m,i) => {
+    if (!m.pending) { if(m.ok) correct++; accs.push(+(correct/(i+1)*100).toFixed(0)); }
+    accsPost.push(null);
+  });
+  // Simulated post-improvement line
+  accsPost[4] = accs[4]; accsPost[5] = accs[5]+6; accsPost[6] = accs[5]+6;
+
+  accuracyChart.data.labels = demoMatches.map((_,i)=>`Match ${i+1}`);
+  accuracyChart.data.datasets[0].data = [...accs, null];
+  accuracyChart.data.datasets[1].data = accsPost;
+  accuracyChart.update();
+
+  // Failure breakdown
+  failureChart.data.datasets[0].data = [4, 6, 5, 3];
+  failureChart.update();
+
+  // Version table
+  versionData = [
+    { v:'v1',                total:4, correct:2, active:false },
+    { v:'v20260609_1430',    total:2, correct:2, active:false },
+    { v:'v20260610_0900',    total:1, correct:0, active:true  },
+  ];
+  renderVersionTable();
+
+  // KPIs
+  document.getElementById('kpi-total').textContent    = '7';
+  document.getElementById('kpi-accuracy').textContent = '57%';
+  document.getElementById('kpi-cycles').textContent   = '2';
+  document.getElementById('kpi-version').textContent  = 'v20260610';
+
+  // Improvement logs
+  addLog('loop',   'Cycle 1 complete', 'Analysed 4 failures → enforced injury check (rate was 75%). New version: v20260609_1430');
+  addLog('eval',   'Evaluations run',  '4 traces scored: 2 correct, 2 overconfident. Composite score: 0.51 → 0.68 after fix.');
+  addLog('deploy', 'v20260610_0900 deployed', 'Added shallow reasoning enforcement. Baseline accuracy target: 65%.');
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────────
+function renderPredictions() {
+  const el = document.getElementById('predList');
+  el.innerHTML = [...predictions].reverse().map(p => `
+    <div class="pred-item">
+      <div>
+        <div class="pred-match">${p.m}</div>
+        <div class="pred-meta">v: ${p.v} · conf: ${(p.c*100).toFixed(0)}%</div>
+      </div>
+      <div class="pred-score">${p.p}</div>
+      <div>
+        ${p.pending
+          ? '<span class="outcome-badge pending">PENDING</span>'
+          : p.ok
+            ? '<span class="outcome-badge correct">✓ CORRECT</span>'
+            : `<span class="outcome-badge incorrect">✗ ACTUAL: ${p.a}</span>`}
+        <div class="pred-conf">${(p.c*100).toFixed(0)}% conf</div>
+      </div>
+    </div>`).join('');
+}
+
+function renderVersionTable() {
+  const el = document.getElementById('versionTable');
+  el.innerHTML = versionData.map(v => {
+    const acc = v.total ? +(v.correct/v.total*100).toFixed(0) : 0;
+    return `
+      <tr>
+        <td><span class="version-pill ${v.active?'active':''}">${v.v}</span></td>
+        <td>${v.total}</td>
+        <td>${acc}%</td>
+        <td>
+          <div class="bar-wrap"><div class="bar-fill" style="width:${acc}%"></div></div>
+        </td>
+        <td style="color:${v.active?'var(--accent2)':'var(--muted)'}">
+          ${v.active ? '● Active' : '○ Archived'}
+        </td>
+      </tr>`;
+  }).join('');
+}
+
+function addLog(type, title, desc) {
+  const icons = { loop:'🔄', eval:'📊', deploy:'🚀' };
+  const now = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  const el = document.getElementById('logList');
+  const item = document.createElement('div');
+  item.className = 'log-item';
+  item.innerHTML = `
+    <div class="log-icon ${type}">${icons[type]||'•'}</div>
+    <div class="log-body">
+      <div class="log-title">${title}</div>
+      <div class="log-desc">${desc}</div>
+    </div>
+    <div class="log-time">${now}</div>`;
+  el.insertBefore(item, el.firstChild);
+}
+
+// ── Chat ───────────────────────────────────────────────────────────────────────
+async function sendChat() {
+  const input = document.getElementById('chatInput');
+  const btn   = document.getElementById('sendBtn');
+  const msgs  = document.getElementById('messages');
+  const text  = input.value.trim();
+  if (!text) return;
+
+  // User bubble
+  input.value = '';
+  btn.disabled = true;
+  msgs.insertAdjacentHTML('beforeend', `<div class="msg user">${escHtml(text)}</div>`);
+
+  // Typing indicator
+  const typing = document.createElement('div');
+  typing.className = 'msg agent';
+  typing.innerHTML = '<span class="spinner"></span> Analysing…';
+  msgs.appendChild(typing);
+  msgs.scrollTop = msgs.scrollHeight;
+
+  try {
+    const res = await fetch(`${API}/chat`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ message: text, session_id: sessionId })
+    });
+    const data = await res.json();
+    typing.innerHTML = escHtml(data.response || data.result || JSON.stringify(data))
+      + '<div class="msg-meta">Powered by Gemini · Traced by Arize Phoenix</div>';
+  } catch(e) {
+    // Demo fallback
+    typing.innerHTML = getDemoResponse(text)
+      + '<div class="msg-meta">Demo mode · No API connected</div>';
+  }
+
+  btn.disabled = false;
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function getDemoResponse(q) {
+  q = q.toLowerCase();
+  if (q.includes('brazil'))
+    return "Brazil look strong 🇧🇷 — 4W-1D in last 5, Vinicius Jr fit after knee scare. Key concern: Rodrygo has a yellow card. My v1 prediction was 2-0 vs Mexico (actual: 2-1). Confidence: 0.69.";
+  if (q.includes('fail') || q.includes('wrong') || q.includes('incorrect'))
+    return "I queried Phoenix for my failure traces 🔍 — the most common pattern: 75% of my wrong predictions didn't use the injury tool. I also over-stated confidence above 0.75 on 4 occasions where I got the direction wrong. My improvement loop addressed both of these in v20260609_1430.";
+  if (q.includes('france'))
+    return "France 🇫🇷 are my pick to win the tournament. Strong squad depth, Mbappé 100% fit, and their H2H record vs top 10 sides is 7W-1D-2L in the last 2 years. One risk: they've played tired at 120min mark twice already this tournament.";
+  if (q.includes('improve') || q.includes('getting better'))
+    return "Yes! After 2 improvement cycles: v1 accuracy was 50%, v20260609_1430 improved to 67%, v20260610_0900 is the latest and targets 70%+. Gemini identified and fixed: missing injury checks, overconfidence on high-stakes matches, and shallow H2H analysis. All changes tracked as Phoenix experiments.";
+  return "I analysed upcoming fixtures and retrieved live form data from WC26 MCP. That prediction is stored in Phoenix with full trace — you can inspect the reasoning spans at app.phoenix.arize.com. Ask me about a specific team for detailed analysis!";
+}
+
+function escHtml(t) {
+  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Polling ────────────────────────────────────────────────────────────────────
+async function pollPerformance() {
+  try {
+    const res  = await fetch(`${API}/performance`);
+    const data = await res.json();
+    if (data.total_predictions > 0) {
+      document.getElementById('kpi-total').textContent    = data.total_predictions;
+      document.getElementById('kpi-accuracy').textContent = (data.accuracy_rate*100).toFixed(0)+'%';
+      document.getElementById('kpi-cycles').textContent   = data.improvement_cycles;
+    }
+  } catch(_) {}
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────────
+seedDemoData();
+setInterval(pollPerformance, 10000);
+</script>
+</body>
+</html>
