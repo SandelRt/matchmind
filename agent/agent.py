@@ -2,16 +2,14 @@
 MatchMind ADK Agent definition.
 
 Wires together:
-  - Gemini LLM (required by hackathon rules)
-  - Google ADK LlmAgent runtime (required for OpenInference tracing)
-  - WC26 MCPToolset  → live World Cup data (18 tools)
-  - Phoenix MCPToolset → self-introspection at runtime
-  - Custom FunctionTools → prediction storage + match data helpers
+  - Gemini LLM (Google AI Studio)
+  - Google ADK LlmAgent runtime
+  - Phoenix MCPToolset → self-introspection at runtime (optional)
+  - Custom FunctionTools → all 9 match-data + prediction tools
 """
 import logging
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
-from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioServerParameters
 
 from agent.config import config
 from agent.prompts.templates import get_active_prediction_prompt
@@ -32,52 +30,55 @@ from agent.tools.prediction import (
 logger = logging.getLogger("matchmind.agent")
 
 
+def _build_phoenix_mcp():
+    """
+    Try to build the Phoenix MCP toolset for runtime self-introspection.
+    Returns None (and logs a warning) if npx / the package is unavailable —
+    the agent degrades gracefully without it.
+    """
+    if not config.PHOENIX_API_KEY:
+        logger.info("PHOENIX_API_KEY not set — Phoenix MCP disabled")
+        return None
+
+    try:
+        from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioServerParameters
+        phoenix_mcp = MCPToolset(
+            connection_params=StdioServerParameters(
+                command="npx",
+                args=[
+                    "-y",
+                    "@arizeai/phoenix-mcp@latest",
+                    "--baseUrl", config.PHOENIX_BASE_URL,
+                    "--apiKey",  config.PHOENIX_API_KEY,
+                ],
+            ),
+            # Expose only the introspection subset — keeps Gemini's tool list lean
+            tool_filter=[
+                "list_projects",
+                "get_traces",
+                "get_spans",
+                "get_prompts",
+                "create_prompt",
+                "get_experiments",
+                "get_datasets",
+                "get_annotation_configs",
+                "get_sessions",
+            ],
+        )
+        logger.info("Phoenix MCP toolset configured")
+        return phoenix_mcp
+    except Exception as exc:
+        logger.warning("Phoenix MCP unavailable (npx not found?): %s — running without it", exc)
+        return None
+
+
 def build_agent() -> LlmAgent:
     """
     Construct and return the fully wired MatchMind agent.
     Call once at application startup after tracing is configured.
     """
 
-    # ── MCP: Phoenix self-introspection ───────────────────────────────────────
-    # The agent can query its OWN traces, spans, prompts, and experiments
-    # at runtime — this is the self-improvement mechanism.
-    phoenix_mcp = MCPToolset(
-        connection_params=StdioServerParameters(
-            command="npx",
-            args=[
-                "-y",
-                "@arizeai/phoenix-mcp@latest",
-                "--baseUrl", config.PHOENIX_BASE_URL,
-                "--apiKey",  config.PHOENIX_API_KEY,
-            ],
-        ),
-        # Expose only the tools the agent needs for self-introspection
-        # (prevents Gemini's context from being flooded with unused tools)
-        tool_filter=[
-            "list_projects",
-            "get_traces",
-            "get_spans",
-            "get_prompts",
-            "create_prompt",
-            "get_experiments",
-            "get_datasets",
-            "get_annotation_configs",
-            "get_sessions",
-        ],
-    )
-
-    # ── MCP: WC26 live World Cup data ─────────────────────────────────────────
-    # Provides 18 live tools: matches, teams, venues, odds, standings,
-    # fan zones, city guides, head-to-head records, injuries, news.
-    # No API key required.
-    wc26_mcp = MCPToolset(
-        connection_params=StdioServerParameters(
-            command="npx",
-            args=["-y", "wc26-mcp@latest"],
-        ),
-    )
-
-    # ── Custom Python tools ───────────────────────────────────────────────────
+    # ── Custom Python tools (always available) ────────────────────────────────
     custom_tools = [
         FunctionTool(get_upcoming_matches),
         FunctionTool(get_team_form),
@@ -90,6 +91,12 @@ def build_agent() -> LlmAgent:
         FunctionTool(update_prediction_with_result),
     ]
 
+    # ── Optional: Phoenix MCP for runtime self-introspection ──────────────────
+    tools = list(custom_tools)
+    phoenix_mcp = _build_phoenix_mcp()
+    if phoenix_mcp:
+        tools.append(phoenix_mcp)
+
     # ── Agent assembly ────────────────────────────────────────────────────────
     agent = LlmAgent(
         model=config.GEMINI_MODEL,
@@ -100,15 +107,13 @@ def build_agent() -> LlmAgent:
             "via Arize Phoenix to continuously improve accuracy."
         ),
         instruction=get_active_prediction_prompt(),
-        tools=custom_tools + [phoenix_mcp, wc26_mcp],
+        tools=tools,
     )
 
     logger.info(
-        "MatchMind agent built",
-        extra={
-            "model": config.GEMINI_MODEL,
-            "custom_tools": len(custom_tools),
-            "mcp_servers": 2,
-        },
+        "MatchMind agent built — model=%s  custom_tools=%d  phoenix_mcp=%s",
+        config.GEMINI_MODEL,
+        len(custom_tools),
+        "enabled" if phoenix_mcp else "disabled",
     )
     return agent

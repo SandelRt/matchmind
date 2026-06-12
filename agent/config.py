@@ -40,7 +40,7 @@ class Config:
     # ── Improvement Loop ──────────────────────────────────────────────────────
     # Min failures before triggering improvement cycle
     IMPROVEMENT_TRIGGER_THRESHOLD: int = field(
-        default_factory=lambda: int(os.getenv("IMPROVEMENT_TRIGGER_THRESHOLD", "5"))
+        default_factory=lambda: int(os.getenv("IMPROVEMENT_TRIGGER_THRESHOLD", "1"))
     )
     # Min accuracy delta to deploy a new prompt version
     IMPROVEMENT_MIN_DELTA: float = field(
