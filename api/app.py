@@ -122,7 +122,7 @@ async def _run_agent(prompt: str, session_id: str = "default") -> str:
     if session_id in sessions:
         session = sessions[session_id]
     else:
-        session = session_service.create_session(app_name=APP_NAME, user_id="default")
+        session = await session_service.create_session(app_name=APP_NAME, user_id="default")
         sessions[session_id] = session
 
     user_message = genai_types.Content(role="user", parts=[genai_types.Part(text=prompt)])
