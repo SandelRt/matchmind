@@ -28,6 +28,10 @@ steps:
       - "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
       - "--region=${_REGION}"
       - --platform=managed
-      - --allow-unauthenticated
+      - --allow-unauthenticated   # app-level auth via MATCHMIND_API_KEY (X-API-Key header)
       - --memory=1Gi
+      # Single warm instance: sessions + JSON store are per-instance state.
+      # Swap PredictionStore to Firestore before scaling out.
+      - --min-instances=1
+      - --max-instances=1
  

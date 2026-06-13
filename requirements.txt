@@ -4,7 +4,7 @@ google-genai>=1.16.0
 google-cloud-aiplatform>=1.87.0
 
 # ── Arize Phoenix Observability ───────────────────────────────────────────────
-arize-phoenix-client>=0.8.0
+arize-phoenix-client>=2.9.0
 openinference-instrumentation-google-adk>=0.1.0
 openinference-instrumentation-google-genai>=0.4.0
 openinference-semantic-conventions>=0.1.17

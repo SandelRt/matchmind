@@ -72,6 +72,15 @@ def _build_phoenix_mcp():
         return None
 
 
+def _instruction_provider(context=None) -> str:
+    """
+    ADK InstructionProvider — called by the runtime before each agent run.
+    Always returns the CURRENT active prompt, so versions registered by the
+    self-improvement loop go live on the next prediction without redeploy.
+    """
+    return get_active_prediction_prompt()
+
+
 def build_agent() -> LlmAgent:
     """
     Construct and return the fully wired MatchMind agent.
@@ -98,6 +107,11 @@ def build_agent() -> LlmAgent:
         tools.append(phoenix_mcp)
 
     # ── Agent assembly ────────────────────────────────────────────────────────
+    # NOTE (June 2026 fix): `instruction` is an ADK InstructionProvider
+    # (callable, re-evaluated on every run) — NOT a frozen string. This is
+    # what makes improvement-loop prompt updates take effect immediately
+    # without a redeploy. Passing get_active_prediction_prompt() by value
+    # here would silently freeze the v1 prompt forever.
     agent = LlmAgent(
         model=config.GEMINI_MODEL,
         name="matchmind",
@@ -106,7 +120,7 @@ def build_agent() -> LlmAgent:
             "Uses live tournament data and introspects its own prediction history "
             "via Arize Phoenix to continuously improve accuracy."
         ),
-        instruction=get_active_prediction_prompt(),
+        instruction=_instruction_provider,
         tools=tools,
     )
 

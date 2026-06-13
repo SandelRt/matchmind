@@ -32,6 +32,18 @@ class Config:
         default_factory=lambda: os.getenv("PHOENIX_PROJECT_NAME", "matchmind")
     )
 
+    # ── Security ──────────────────────────────────────────────────────────────
+    # API key required (X-API-Key header) on all mutating/LLM endpoints.
+    # If empty, auth is DISABLED — local dev only. Set via Secret Manager in prod.
+    MATCHMIND_API_KEY: str = field(
+        default_factory=lambda: os.getenv("MATCHMIND_API_KEY", "")
+    )
+
+    # ── Durable store ─────────────────────────────────────────────────────────
+    STORE_PATH: str = field(
+        default_factory=lambda: os.getenv("STORE_PATH", "/tmp/matchmind_store.json")
+    )
+
     # ── App ───────────────────────────────────────────────────────────────────
     APP_HOST: str = field(default_factory=lambda: os.getenv("APP_HOST", "0.0.0.0"))
     APP_PORT: int = field(default_factory=lambda: int(os.getenv("PORT", "8080")))

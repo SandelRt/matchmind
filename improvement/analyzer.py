@@ -1,78 +1,68 @@
 """
 Trace Failure Analyzer.
 
-Uses Phoenix MCP tools (injected via ADK at runtime) to:
-  1. Query the agent's own worst-performing traces
-  2. Extract structured failure patterns
-  3. Pull the current active prompt version
-
-This is the "eyes" of the self-improvement loop — it reads
-what Phoenix knows about us and turns it into actionable intelligence.
+June 2026 fix: failures are now read from the durable PredictionStore —
+the same records the evaluators write — instead of from Phoenix REST
+queries against endpoints that don't exist. Phoenix is used (best-effort,
+via PhoenixSync) only to persist new prompt versions for durability and
+experiment tracking. The loop no longer silently no-ops when Phoenix is
+unreachable.
 """
-import json
 import logging
-from typing import Any, Callable, Awaitable
+from typing import Any, Optional
+
+from agent.prediction_store import store
+from agent.prompts.templates import (
+    get_active_prediction_prompt,
+    get_active_version,
+)
 
 logger = logging.getLogger("matchmind.improvement.analyzer")
-
-# Type alias for a Phoenix MCP tool callable
-PhoenixTool = Callable[..., Awaitable[dict[str, Any]]]
 
 
 class TraceFailureAnalyzer:
 
-    def __init__(self, phoenix_tools: dict[str, PhoenixTool]) -> None:
+    def __init__(self, phoenix_sync: Optional[Any] = None) -> None:
         """
         Args:
-            phoenix_tools: Dict of tool_name → async callable
-                           sourced from the Phoenix MCPToolset at runtime.
-                           Expected keys: get_traces, get_spans,
-                           get_prompts, create_prompt, get_experiments.
+            phoenix_sync: Optional PhoenixSync instance for best-effort
+                          prompt persistence. The analyzer works fully
+                          without it.
         """
-        self._t = phoenix_tools
+        self._sync = phoenix_sync
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     async def get_recent_failures(
         self,
-        project_name: str,
+        project_name: str = "",
         limit: int = 20,
     ) -> list[dict]:
         """
-        Query Phoenix for traces where accuracy eval = incorrect.
-        Returns a list of structured failure records.
+        Return structured failure records (evaluated + incorrect), newest first.
+        Source of truth: PredictionStore.
         """
-        logger.info("Querying Phoenix for recent failures", extra={"limit": limit})
-
-        raw = await self._t["get_traces"](
-            project_name=project_name,
-            filter_condition="evals['accuracy'].label == 'incorrect'",
-            limit=limit,
-            sort_by="start_time",
-            sort_direction="desc",
-        )
-
+        rows = store.get_failures(limit=limit)
         failures = []
-        for trace in raw.get("data", []):
-            attrs = trace.get("root_span", {}).get("attributes", {})
+        for rec in rows:
             failures.append({
-                "trace_id":          trace.get("trace_id"),
-                "match_id":          attrs.get("matchmind.match_id"),
-                "home_team":         attrs.get("matchmind.home_team"),
-                "away_team":         attrs.get("matchmind.away_team"),
-                "prediction":        attrs.get("matchmind.prediction"),
-                "actual_result":     attrs.get("matchmind.actual_result"),
-                "confidence":        float(attrs.get("matchmind.confidence", 0.5)),
-                "reasoning":         attrs.get("matchmind.reasoning", ""),
-                "factors":           json.loads(attrs.get("matchmind.factors_considered", "[]")),
-                "tools_called":      attrs.get("matchmind.tools_called", "").split(","),
-                "tool_count":        int(attrs.get("matchmind.tool_count", 0)),
-                "prompt_version":    attrs.get("matchmind.prompt_version", "unknown"),
-                "calibration":       attrs.get("eval.calibration"),
-                "reasoning_quality": attrs.get("eval.reasoning_quality"),
+                "trace_id":          rec.get("trace_id"),
+                "span_id":           rec.get("span_id"),
+                "match_id":          rec.get("match_id"),
+                "home_team":         rec.get("home_team"),
+                "away_team":         rec.get("away_team"),
+                "prediction":        rec.get("prediction"),
+                "actual_result":     rec.get("actual_result"),
+                "confidence":        float(rec.get("confidence", 0.5)),
+                "reasoning":         rec.get("reasoning", ""),
+                "factors":           rec.get("factors", []),
+                "tools_called":      rec.get("tools_called", []),
+                "tool_count":        int(rec.get("tool_count", 0)),
+                "prompt_version":    rec.get("prompt_version", "unknown"),
+                "calibration":       rec.get("calibration"),
+                "reasoning_quality": rec.get("reasoning_quality"),
             })
-
-        logger.info("Failures retrieved", extra={"count": len(failures)})
+        logger.info("Failures retrieved from store", extra={"count": len(failures)})
         return failures
 
     async def extract_failure_patterns(self, failures: list[dict]) -> dict:
@@ -86,25 +76,19 @@ class TraceFailureAnalyzer:
         total = len(failures)
         patterns: dict[str, Any] = {
             "total_failures": total,
-            # Calibration issues
             "overconfident_count": 0,
             "underconfident_count": 0,
-            # Data coverage issues
-            "missing_injury_check_count": 0,     # injury tool not called
-            "low_tool_usage_count": 0,            # < 4 tools used
-            "no_h2h_check_count": 0,              # head-to-head not called
-            # Reasoning depth
-            "shallow_reasoning_count": 0,         # reasoning_quality == low
-            # By prompt version (to track regressions)
+            "missing_injury_check_count": 0,
+            "low_tool_usage_count": 0,
+            "no_h2h_check_count": 0,
+            "shallow_reasoning_count": 0,
             "by_prompt_version": {},
-            # Confidence distribution of wrong predictions
-            "wrong_high_confidence_count": 0,     # confidence >= 0.70 AND incorrect
+            "wrong_high_confidence_count": 0,
         }
 
         for f in failures:
             pv = f.get("prompt_version", "unknown")
-            if pv not in patterns["by_prompt_version"]:
-                patterns["by_prompt_version"][pv] = 0
+            patterns["by_prompt_version"].setdefault(pv, 0)
             patterns["by_prompt_version"][pv] += 1
 
             if f.get("calibration") == "overconfident":
@@ -112,7 +96,7 @@ class TraceFailureAnalyzer:
             if f.get("calibration") == "underconfident":
                 patterns["underconfident_count"] += 1
 
-            tools = [t.lower() for t in f.get("tools_called", [])]
+            tools = [str(t).lower() for t in f.get("tools_called", [])]
             if not any("injur" in t for t in tools):
                 patterns["missing_injury_check_count"] += 1
             if not any("head" in t or "h2h" in t for t in tools):
@@ -126,40 +110,18 @@ class TraceFailureAnalyzer:
             if f.get("confidence", 0) >= 0.70:
                 patterns["wrong_high_confidence_count"] += 1
 
-        # Compute rates
-        patterns["overconfident_rate"] = round(
-            patterns["overconfident_count"] / total, 2
-        )
-        patterns["injury_miss_rate"] = round(
-            patterns["missing_injury_check_count"] / total, 2
-        )
-        patterns["shallow_reasoning_rate"] = round(
-            patterns["shallow_reasoning_count"] / total, 2
-        )
+        patterns["overconfident_rate"] = round(patterns["overconfident_count"] / total, 2)
+        patterns["injury_miss_rate"] = round(patterns["missing_injury_check_count"] / total, 2)
+        patterns["shallow_reasoning_rate"] = round(patterns["shallow_reasoning_count"] / total, 2)
 
         return patterns
 
-    async def get_current_prompt(self, project_name: str) -> dict:
-        """
-        Retrieve the active prompt version from Phoenix Prompt Management.
-        Falls back to {"version": "v1", "content": "", "id": None} if empty.
-        """
-        response = await self._t["get_prompts"](project_name=project_name)
-        prompts  = response.get("data", [])
-
-        if not prompts:
-            return {"version": "v1", "content": "", "id": None}
-
-        # Return highest version number
-        latest = sorted(
-            prompts,
-            key=lambda p: p.get("version_num", 0),
-            reverse=True,
-        )[0]
+    async def get_current_prompt(self, project_name: str = "") -> dict:
+        """Active prompt from the local registry (durable via store)."""
         return {
-            "version": latest.get("version", "v1"),
-            "content": latest.get("content", ""),
-            "id":      latest.get("id"),
+            "version": get_active_version(),
+            "content": get_active_prediction_prompt(),
+            "id": None,
         }
 
     async def create_improved_prompt(
@@ -170,31 +132,19 @@ class TraceFailureAnalyzer:
         description: str,
     ) -> dict:
         """
-        Write a new prompt version to Phoenix Prompt Management.
-        This makes the new version available for experiment tracking
-        and allows the agent to fetch it at next startup.
+        Persist a new prompt version. Local registration is handled by the
+        loop (register_new_version); this pushes to Phoenix best-effort.
         """
-        result = await self._t["create_prompt"](
-            project_name=project_name,
-            name="match_prediction_prompt",
-            version=version_tag,
-            content=content,
-            description=description,
-            tags=["auto_generated", "improvement_loop"],
-        )
-        logger.info(
-            "New prompt version created in Phoenix",
-            extra={"version": version_tag, "description": description},
-        )
-        return result
+        prompt_id = None
+        if self._sync and getattr(self._sync, "enabled", False):
+            from agent.config import config
+            prompt_id = await self._sync.push_prompt_version(
+                content=content,
+                description=f"{version_tag}: {description}",
+                model_name=config.GEMINI_MODEL,
+            )
+        return {"id": prompt_id, "version": version_tag}
 
-    async def get_performance_by_version(self, project_name: str) -> list[dict]:
-        """
-        Retrieve experiment results per prompt version from Phoenix.
-        Used by the dashboard performance endpoint.
-        """
-        response = await self._t["get_experiments"](
-            project_name=project_name,
-            dataset_name="match_predictions",
-        )
-        return response.get("data", [])
+    async def get_performance_by_version(self, project_name: str = "") -> dict:
+        """Accuracy stats per prompt version from the store."""
+        return store.accuracy_by_version()

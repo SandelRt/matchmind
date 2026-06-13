@@ -1,168 +1,160 @@
 """
-Phoenix REST client wrappers.
+Phoenix sync layer — wraps the official `arize-phoenix-client` SDK.
 
-Provides the same async-callable interface that TraceFailureAnalyzer and
-SelfImprovementLoop expect, but backed by the Phoenix HTTP API instead of
-the MCP stdio subprocess.
+June 2026 fix: the previous version hand-rolled REST calls against
+endpoints that don't exist in the Phoenix API (e.g. GET /v1/traces with an
+eval filter_condition) and swallowed every error into {"data": []}. The
+improvement loop therefore always saw zero failures and silently no-oped.
 
-This lets the improvement loop run independently of the agent's MCP session
-— it calls Phoenix directly over HTTPS while the ADK agent uses the MCP
-server for in-conversation self-introspection.
-
-Usage:
-    tools = build_phoenix_tools(api_key=..., base_url=..., project=...)
-    analyzer = TraceFailureAnalyzer(phoenix_tools=tools)
+This rewrite:
+  - uses the official AsyncClient (correct endpoints, correct auth)
+  - uploads eval results as span annotations  (client.spans.log_span_annotations)
+  - persists prompt versions to Phoenix Prompt Management (client.prompts.create)
+  - fetches the latest prompt version at startup     (client.prompts.get)
+  - is explicitly BEST-EFFORT: the local PredictionStore is the source of
+    truth; every Phoenix failure is logged loudly and returns None/False
+    instead of pretending to be data.
 """
-import json
 import logging
-from typing import Any
+from typing import Any, Optional
 
-import httpx
+logger = logging.getLogger("matchmind.observability.phoenix")
 
-logger = logging.getLogger("matchmind.observability.phoenix_client")
+PROMPT_NAME = "match_prediction_prompt"
 
-# ── Low-level HTTP client ──────────────────────────────────────────────────────
 
-class PhoenixHTTPClient:
-    """Thin async wrapper around the Arize Phoenix REST API."""
-
-    def __init__(self, api_key: str, base_url: str) -> None:
-        self._base = base_url.rstrip("/")
-        self._headers = {
-            "api_key":      api_key,
-            "Content-Type": "application/json",
-        }
-
-    async def _get(self, path: str, params: dict | None = None) -> dict:
-        url = f"{self._base}{path}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=self._headers, params=params or {})
-            resp.raise_for_status()
-            return resp.json()
-
-    async def _post(self, path: str, body: dict) -> dict:
-        url = f"{self._base}{path}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                url, headers=self._headers, content=json.dumps(body)
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    # ── Phoenix API methods ───────────────────────────────────────────────────
-
-    async def get_traces(
-        self,
-        project_name: str,
-        filter_condition: str | None = None,
-        limit: int = 20,
-        sort_by: str = "start_time",
-        sort_direction: str = "desc",
-    ) -> dict:
-        """Query traces for a project, optionally filtered by eval labels."""
-        params: dict[str, Any] = {
-            "project_name": project_name,
-            "limit":        limit,
-            "sort_by":      sort_by,
-            "sort_direction": sort_direction,
-        }
-        if filter_condition:
-            params["filter_condition"] = filter_condition
+class PhoenixSync:
+    def __init__(self, api_key: str, base_url: str, project_name: str) -> None:
+        self.project = project_name
+        self.enabled = False
+        self._client = None
+        if not api_key:
+            logger.info("PHOENIX_API_KEY not set — Phoenix sync disabled")
+            return
         try:
-            return await self._get("/v1/traces", params)
+            from phoenix.client import AsyncClient
+            self._client = AsyncClient(base_url=base_url, api_key=api_key)
+            self.enabled = True
+            logger.info("Phoenix sync enabled -> %s (project=%s)", base_url, project_name)
         except Exception as exc:
-            logger.warning("get_traces failed: %s — returning empty", exc)
-            return {"data": []}
+            logger.warning("Phoenix client unavailable (%s) — sync disabled", exc)
 
-    async def get_spans(
-        self,
-        project_name: str,
-        trace_id: str | None = None,
-        limit: int = 50,
-    ) -> dict:
-        params: dict[str, Any] = {"project_name": project_name, "limit": limit}
-        if trace_id:
-            params["trace_id"] = trace_id
+    # ── eval annotations ──────────────────────────────────────────────────────
+
+    async def log_eval_annotations(self, span_id: str, eval_result: dict) -> bool:
+        """
+        Attach eval results to the original prediction span as annotations.
+        This replaces the broken pattern of trying to mutate an already-exported
+        span (OTel spans are immutable) — annotations are Phoenix's mechanism
+        for exactly this.
+
+        eval_result keys used: accuracy, accuracy_score, calibration,
+        calibration_score, reasoning_quality, reasoning_score, composite_score.
+        """
+        if not self.enabled or not span_id:
+            return False
+        annotations = []
+        for name, label_key, score_key in (
+            ("accuracy", "accuracy", "accuracy_score"),
+            ("calibration", "calibration", "calibration_score"),
+            ("reasoning_quality", "reasoning_quality", "reasoning_score"),
+        ):
+            if label_key in eval_result:
+                annotations.append({
+                    "name": name,
+                    "annotator_kind": "CODE",
+                    "span_id": span_id,
+                    "result": {
+                        "label": str(eval_result[label_key]),
+                        "score": float(eval_result.get(score_key, 0.0)),
+                    },
+                })
+        if "composite_score" in eval_result:
+            annotations.append({
+                "name": "composite",
+                "annotator_kind": "CODE",
+                "span_id": span_id,
+                "result": {"score": float(eval_result["composite_score"])},
+            })
         try:
-            return await self._get("/v1/spans", params)
+            await self._client.spans.log_span_annotations(span_annotations=annotations)
+            logger.info("Phoenix: %d annotations logged for span %s", len(annotations), span_id)
+            return True
         except Exception as exc:
-            logger.warning("get_spans failed: %s — returning empty", exc)
-            return {"data": []}
+            logger.warning("Phoenix annotation upload failed for span %s: %s", span_id, exc)
+            return False
 
-    async def get_prompts(self, project_name: str) -> dict:
-        try:
-            return await self._get(
-                "/v1/prompts", {"project_name": project_name}
-            )
-        except Exception as exc:
-            logger.warning("get_prompts failed: %s — returning empty", exc)
-            return {"data": []}
+    # ── prompt management ─────────────────────────────────────────────────────
 
-    async def create_prompt(
+    async def push_prompt_version(
         self,
-        project_name: str,
-        name: str,
-        version: str,
         content: str,
-        description: str = "",
-        tags: list[str] | None = None,
-    ) -> dict:
-        body = {
-            "project_name": project_name,
-            "name":         name,
-            "version":      version,
-            "content":      content,
-            "description":  description,
-            "tags":         tags or [],
-        }
+        description: str,
+        model_name: str,
+        name: str = PROMPT_NAME,
+    ) -> Optional[str]:
+        """Persist a prompt version to Phoenix Prompt Management. Returns version id."""
+        if not self.enabled:
+            return None
         try:
-            return await self._post("/v1/prompts", body)
+            from phoenix.client.types import PromptVersion
+            version = PromptVersion(
+                [{"role": "system", "content": content}],
+                model_name=model_name,
+                model_provider="GOOGLE",
+                template_format="NONE",
+                description=description,
+            )
+            created = await self._client.prompts.create(
+                name=name, version=version, prompt_description=description,
+            )
+            vid = getattr(created, "id", None)
+            logger.info("Phoenix: prompt version pushed (id=%s)", vid)
+            return vid
         except Exception as exc:
-            logger.warning("create_prompt failed: %s — returning stub", exc)
-            return {"id": None, "version": version}
+            logger.warning("Phoenix prompt push failed: %s", exc)
+            return None
 
-    async def get_experiments(
-        self,
-        project_name: str,
-        dataset_name: str | None = None,
-    ) -> dict:
-        params: dict[str, Any] = {"project_name": project_name}
-        if dataset_name:
-            params["dataset_name"] = dataset_name
+    async def fetch_latest_prompt(self, name: str = PROMPT_NAME) -> Optional[str]:
+        """Fetch latest prompt version content. Used at startup to survive restarts."""
+        if not self.enabled:
+            return None
         try:
-            return await self._get("/v1/experiments", params)
+            version = await self._client.prompts.get(prompt_identifier=name)
+            return _extract_prompt_text(version)
         except Exception as exc:
-            logger.warning("get_experiments failed: %s — returning empty", exc)
-            return {"data": []}
-
-    async def list_projects(self) -> dict:
-        try:
-            return await self._get("/v1/projects")
-        except Exception as exc:
-            logger.warning("list_projects failed: %s", exc)
-            return {"data": []}
+            logger.info("Phoenix: no stored prompt fetched (%s) — using local", exc)
+            return None
 
 
-# ── Tool dict builder ─────────────────────────────────────────────────────────
+def _extract_prompt_text(version: Any) -> Optional[str]:
+    """Pull the system-message text out of a PromptVersion, defensively."""
+    try:
+        template = getattr(version, "_template", None) or {}
+        messages = template.get("messages", []) if isinstance(template, dict) else []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and "text" in part:
+                        return part["text"]
+    except Exception as exc:
+        logger.warning("Could not extract prompt text: %s", exc)
+    return None
 
-def build_phoenix_tools(
-    api_key: str,
-    base_url: str,
-    project_name: str,  # noqa: F841 – kept for future per-project filtering
-) -> dict:
-    """
-    Return the tool-callable dict expected by TraceFailureAnalyzer.
 
-    Each value is an async callable with the same signature as the
-    corresponding Phoenix MCP tool.
-    """
-    client = PhoenixHTTPClient(api_key=api_key, base_url=base_url)
+# ── Module singleton ──────────────────────────────────────────────────────────
 
-    return {
-        "get_traces":       client.get_traces,
-        "get_spans":        client.get_spans,
-        "get_prompts":      client.get_prompts,
-        "create_prompt":    client.create_prompt,
-        "get_experiments":  client.get_experiments,
-        "list_projects":    client.list_projects,
-    }
+_sync: Optional[PhoenixSync] = None
+
+
+def init_sync(api_key: str, base_url: str, project_name: str) -> PhoenixSync:
+    global _sync
+    _sync = PhoenixSync(api_key=api_key, base_url=base_url, project_name=project_name)
+    return _sync
+
+
+def get_sync() -> Optional[PhoenixSync]:
+    return _sync

@@ -2,6 +2,11 @@
 
 **Apache 2.0 License** · Built for the Google Cloud Rapid Agent Hackathon · Arize Partner Track
 
+> **v1.1.0 (June 2026):** self-improvement loop now verified working
+> end-to-end — live prompt activation via ADK InstructionProvider, durable
+> prediction store, eval write-back as Phoenix span annotations, API-key
+> auth, and automatic regression rollback. See [CHANGES.md](CHANGES.md).
+
 > MatchMind watches itself fail, then rewrites its own instructions.
 > Every wrong prediction makes the next one better.
 

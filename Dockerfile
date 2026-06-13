@@ -12,7 +12,6 @@ WORKDIR /app
 
 # Pre-warm Phoenix MCP and WC26 MCP npx packages
 RUN npx -y @arizeai/phoenix-mcp@latest --help 2>/dev/null || true
-RUN npx -y wc26-mcp@latest --help 2>/dev/null || true
 
 # Python deps
 COPY requirements.txt .

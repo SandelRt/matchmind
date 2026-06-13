@@ -11,7 +11,7 @@ reason meaningfully about every Group Stage match.
 """
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from opentelemetry import trace
 
 from agent.data.wc2026 import (
@@ -45,7 +45,7 @@ async def get_upcoming_matches(days_ahead: int = 3) -> dict:
     with tracer.start_as_current_span("tool.get_upcoming_matches") as span:
         span.set_attribute("tool.days_ahead", days_ahead)
 
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         cutoff = today + timedelta(days=days_ahead)
 
         matches = []
@@ -72,7 +72,7 @@ async def get_upcoming_matches(days_ahead: int = 3) -> dict:
 
         result = {
             "matches": matches,
-            "query_date": datetime.utcnow().isoformat(),
+            "query_date": datetime.now(timezone.utc).isoformat(),
             "cutoff_date": cutoff.isoformat(),
             "source": "wc2026_static",
         }

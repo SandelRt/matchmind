@@ -2,23 +2,32 @@
 MatchMind FastAPI server — deployed to Google Cloud Run.
 
 Endpoints:
-  POST /predict        Generate a match prediction
-  POST /results        Submit actual match result (triggers improvement loop)
-  POST /chat           Multi-turn conversation
-  POST /improve        Manually trigger improvement cycle
-  POST /demo           End-to-end demo: predict 3 matches + improve
-  GET  /performance    Agent performance metrics
-  GET  /health         Health check
-  GET  /              Dashboard (serves frontend/index.html)
+  POST /predict        Generate a match prediction            (auth required)
+  POST /results        Submit actual match result             (auth required)
+  POST /chat           Multi-turn conversation                (auth required)
+  POST /improve        Manually trigger improvement cycle     (auth required)
+  POST /demo           End-to-end demo                        (auth required)
+  GET  /performance    Agent performance metrics              (public)
+  GET  /health         Health check                           (public)
+  GET  /               Dashboard                              (public)
+
+June 2026 security fix: all mutating/LLM-invoking endpoints require an
+X-API-Key header matching MATCHMIND_API_KEY. Without this, anyone with the
+URL could drain the Gemini budget AND - far worse - POST fake results into
+/results, which feeds the self-improvement loop that rewrites the agent's
+own system prompt (unauthenticated prompt injection). If MATCHMIND_API_KEY
+is unset, auth is disabled with a loud startup warning (local dev only).
 """
 import logging
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Security
+from fastapi.security.api_key import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import google.genai as genai
 from google.genai import types as genai_types
 from google.adk.runners import Runner
@@ -26,20 +35,41 @@ from google.adk.sessions import InMemorySessionService
 
 from agent.agent import build_agent
 from agent.config import config
+from agent.prediction_store import store
+from agent.prompts.templates import load_prompt_from_phoenix, get_active_version
 from observability.tracing import setup_tracing, shutdown_tracing
 from observability.evaluators import MatchPredictionEvaluator
-from observability.phoenix_client import build_phoenix_tools
+from observability.phoenix_client import init_sync
 from improvement.analyzer import TraceFailureAnalyzer
 from improvement.loop import SelfImprovementLoop
 
 logger = logging.getLogger("matchmind.api")
 APP_NAME = "matchmind"
+MAX_SESSIONS = 500
 _state: dict = {}
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def require_api_key(key: str | None = Security(_api_key_header)) -> None:
+    expected = config.MATCHMIND_API_KEY
+    if not expected:
+        return  # auth disabled (dev mode) — warned at startup
+    if not key or key != expected:
+        raise HTTPException(401, "Invalid or missing X-API-Key")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("MatchMind starting up...")
+    if not config.MATCHMIND_API_KEY:
+        logger.warning(
+            "MATCHMIND_API_KEY is NOT set — all endpoints are UNAUTHENTICATED. "
+            "Set it before exposing this service publicly."
+        )
+
     setup_tracing(
         phoenix_api_key=config.PHOENIX_API_KEY,
         phoenix_base_url=config.PHOENIX_BASE_URL,
@@ -47,23 +77,34 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Phoenix tracing active -> %s", config.PHOENIX_BASE_URL)
 
+    # Phoenix sync (annotations + prompt persistence) — best-effort layer
+    sync = init_sync(
+        api_key=config.PHOENIX_API_KEY,
+        base_url=config.PHOENIX_BASE_URL,
+        project_name=config.PHOENIX_PROJECT_NAME,
+    )
+
+    # Restore the latest improved prompt from Phoenix so self-improvements
+    # survive cold starts and redeploys.
+    try:
+        restored = await load_prompt_from_phoenix(sync)
+        if restored:
+            logger.info("Prompt restored from Phoenix (version=%s)", get_active_version())
+    except Exception as exc:
+        logger.warning("Prompt restore skipped: %s", exc)
+
     agent = build_agent()
     session_service = InMemorySessionService()
     runner = Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
     _state["agent"] = agent
     _state["runner"] = runner
     _state["session_service"] = session_service
-    _state["sessions"] = {}
+    _state["sessions"] = OrderedDict()
     logger.info("ADK agent + Runner initialized (model: %s)", config.GEMINI_MODEL)
 
     gemini = genai.Client()
     evaluator = MatchPredictionEvaluator()
-    phoenix_tools = build_phoenix_tools(
-        api_key=config.PHOENIX_API_KEY,
-        base_url=config.PHOENIX_BASE_URL,
-        project_name=config.PHOENIX_PROJECT_NAME,
-    )
-    analyzer = TraceFailureAnalyzer(phoenix_tools=phoenix_tools)
+    analyzer = TraceFailureAnalyzer(phoenix_sync=sync)
     improvement_loop = SelfImprovementLoop(
         gemini_client=gemini,
         analyzer=analyzer,
@@ -86,7 +127,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="MatchMind",
     description="Self-improving WC2026 prediction agent. Powered by Gemini, traced by Arize Phoenix.",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -117,13 +158,16 @@ class ChatRequest(BaseModel):
 async def _run_agent(prompt: str, session_id: str = "default") -> str:
     runner = _state["runner"]
     session_service = _state["session_service"]
-    sessions = _state["sessions"]
+    sessions: OrderedDict = _state["sessions"]
 
     if session_id in sessions:
         session = sessions[session_id]
+        sessions.move_to_end(session_id)
     else:
         session = await session_service.create_session(app_name=APP_NAME, user_id="default")
         sessions[session_id] = session
+        while len(sessions) > MAX_SESSIONS:  # LRU eviction — was unbounded
+            sessions.popitem(last=False)
 
     user_message = genai_types.Content(role="user", parts=[genai_types.Part(text=prompt)])
     final_text = ""
@@ -145,7 +189,7 @@ async def dashboard():
     return JSONResponse({"message": "MatchMind API", "docs": "/docs"})
 
 
-@app.post("/predict")
+@app.post("/predict", dependencies=[Security(require_api_key)])
 async def predict_match(req: PredictionRequest):
     if not _state.get("runner"):
         raise HTTPException(503, "Agent not ready")
@@ -153,7 +197,8 @@ async def predict_match(req: PredictionRequest):
         f"Predict the World Cup match: {req.home_team} vs {req.away_team} "
         f"on {req.match_date} (stage: {req.stage}, match_id: {req.match_id}). "
         f"Follow the mandatory 6-step prediction protocol. "
-        f"Store the prediction with match_id '{req.match_id}'."
+        f"Store the prediction with match_id '{req.match_id}' "
+        f"and prompt_version '{get_active_version()}'."
     )
     try:
         result = await _run_agent(prompt, session_id=f"predict_{req.match_id}")
@@ -163,29 +208,48 @@ async def predict_match(req: PredictionRequest):
         raise HTTPException(500, str(exc))
 
 
-@app.post("/results")
+@app.post("/results", dependencies=[Security(require_api_key)])
 async def submit_result(req: ResultRequest, background: BackgroundTasks):
     if not _state.get("runner"):
         raise HTTPException(503, "Agent not ready")
     from agent.tools.match_data import record_result as _rec
+    from agent.tools.prediction import process_match_result
+
     _rec(req.match_id, req.home_goals, req.away_goals)
     actual_score = f"{req.home_goals}-{req.away_goals}"
+
+    # Let the agent narrate/update via its tool...
     update_prompt = (
         f"The match with ID '{req.match_id}' has ended. "
         f"Final score: {actual_score}. "
         f"Call update_prediction_with_result() to record this result."
     )
-    await _run_agent(update_prompt, session_id=f"result_{req.match_id}")
+    try:
+        await _run_agent(update_prompt, session_id=f"result_{req.match_id}")
+    except Exception as exc:
+        logger.warning("Agent result-update run failed (%s) — using direct path", exc)
+
+    # ...but never DEPEND on the LLM calling the tool: if the record is
+    # still unevaluated, run the same pipeline directly.
+    rec = store.get(req.match_id)
+    eval_summary = None
+    if rec and not rec.get("evaluated"):
+        result = await process_match_result(req.match_id, req.home_goals, req.away_goals)
+        eval_summary = result.get("accuracy")
+    elif rec:
+        eval_summary = rec.get("accuracy")
+
     background.add_task(_run_improvement_loop, [req.match_id])
     return {
         "status": "result_recorded",
         "match_id": req.match_id,
         "actual_score": actual_score,
+        "accuracy": eval_summary,
         "improvement_loop_queued": True,
     }
 
 
-@app.post("/chat")
+@app.post("/chat", dependencies=[Security(require_api_key)])
 async def chat(req: ChatRequest):
     if not _state.get("runner"):
         raise HTTPException(503, "Agent not ready")
@@ -197,18 +261,19 @@ async def chat(req: ChatRequest):
         raise HTTPException(500, str(exc))
 
 
-@app.post("/improve")
+@app.post("/improve", dependencies=[Security(require_api_key)])
 async def trigger_improvement(background: BackgroundTasks):
     background.add_task(_run_improvement_loop, [])
     return {"status": "improvement_loop_triggered"}
 
 
-@app.post("/demo")
+@app.post("/demo", dependencies=[Security(require_api_key)])
 async def run_demo():
     """End-to-end demo: predict 3 matches, submit results, run improvement cycle."""
     if not _state.get("runner"):
         raise HTTPException(503, "Agent not ready")
     from agent.tools.match_data import record_result as _rec
+    from agent.tools.prediction import process_match_result
 
     demo_matches = [
         {"match_id": "WC26_G1", "home_team": "Argentina", "away_team": "Chile",
@@ -231,7 +296,7 @@ async def run_demo():
             f"Predict: {m['home_team']} vs {m['away_team']} "
             f"(stage={m['stage']}, match_id={m['match_id']}). "
             f"Follow the full 6-step prediction protocol. "
-            f"Store with store_prediction()."
+            f"Store with store_prediction() using prompt_version '{get_active_version()}'."
         )
         try:
             prediction = await _run_agent(prompt, session_id=f"demo_{m['match_id']}")
@@ -248,17 +313,16 @@ async def run_demo():
 
     for r in demo_results:
         _rec(r["match_id"], r["home_goals"], r["away_goals"])
-        update_prompt = (
-            f"Match {r['match_id']} ended {r['home_goals']}-{r['away_goals']}. "
-            f"Call update_prediction_with_result()."
-        )
         try:
-            await _run_agent(update_prompt, session_id=f"demo_result_{r['match_id']}")
+            result = await process_match_result(
+                r["match_id"], r["home_goals"], r["away_goals"]
+            )
             steps.append({
                 "step": "result",
                 "match_id": r["match_id"],
                 "actual": f"{r['home_goals']}-{r['away_goals']}",
-                "status": "recorded",
+                "accuracy": result.get("accuracy"),
+                "status": result.get("status", "recorded"),
             })
         except Exception as exc:
             steps.append({"step": "result", "match_id": r["match_id"],
@@ -286,34 +350,20 @@ async def run_demo():
 
 @app.get("/performance")
 async def get_performance():
-    analyzer = _state.get("analyzer")
-    loop = _state.get("improvement_loop")
-    by_version: dict = {}
-    total = 0
-    correct = 0
-    if analyzer:
-        try:
-            all_traces = await analyzer._t["get_traces"](
-                project_name=config.PHOENIX_PROJECT_NAME, limit=100
-            )
-            for t in all_traces.get("data", []):
-                total += 1
-                attrs = t.get("root_span", {}).get("attributes", {})
-                pv = attrs.get("matchmind.prompt_version", "v1")
-                if pv not in by_version:
-                    by_version[pv] = {"total": 0, "correct": 0}
-                by_version[pv]["total"] += 1
-                if attrs.get("matchmind.evaluated") and attrs.get("eval.accuracy") == "correct":
-                    correct += 1
-                    by_version[pv]["correct"] += 1
-        except Exception as exc:
-            logger.warning("Performance query failed: %s", exc)
+    """
+    Performance metrics — now read from the durable PredictionStore (the
+    same records the evaluators write) instead of misreading root-span
+    attributes from a Phoenix endpoint that never returned data.
+    """
+    totals = store.totals()
     return {
-        "total_predictions": total,
-        "accuracy_rate": round(correct / total, 4) if total else 0.0,
-        "by_prompt_version": by_version,
-        "improvement_cycles": getattr(loop, "_cycle_count", 0),
-        "last_improvement_at": None,
+        "total_predictions": totals["total_predictions"],
+        "evaluated": totals["evaluated"],
+        "accuracy_rate": totals["accuracy_rate"],
+        "by_prompt_version": store.accuracy_by_version(),
+        "active_prompt_version": get_active_version(),
+        "improvement_cycles": store.cycle_count,
+        "last_improvement_at": store.last_improvement_at,
     }
 
 
@@ -322,9 +372,11 @@ async def health():
     return {
         "status": "healthy",
         "agent": "matchmind",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "model": config.GEMINI_MODEL,
         "phoenix": config.PHOENIX_BASE_URL,
+        "auth": "enabled" if config.MATCHMIND_API_KEY else "DISABLED (dev mode)",
+        "active_prompt_version": get_active_version(),
     }
 
 
