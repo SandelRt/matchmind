@@ -22,9 +22,9 @@ async def store_prediction(
     result_direction: str,
     confidence: float,
     reasoning: str,
-    factors_considered: list,
-    uncertainty_factors: list,
-    tools_called: list,
+    factors_considered: str,
+    uncertainty_factors: str,
+    tools_called: str,
     prompt_version: str,
 ) -> dict:
     """
@@ -62,10 +62,10 @@ async def store_prediction(
 
         # ── Rich reasoning context ────────────────────────────────────────────
         span.set_attribute("matchmind.reasoning",              reasoning)
-        span.set_attribute("matchmind.factors_considered",     json.dumps(factors_considered))
-        span.set_attribute("matchmind.uncertainty_factors",    json.dumps(uncertainty_factors))
-        span.set_attribute("matchmind.tools_called",           ",".join(tools_called))
-        span.set_attribute("matchmind.tool_count",             len(tools_called))
+        span.set_attribute("matchmind.factors_considered",     factors_considered if isinstance(factors_considered, str) else json.dumps(factors_considered))
+        span.set_attribute("matchmind.uncertainty_factors",    uncertainty_factors if isinstance(uncertainty_factors, str) else json.dumps(uncertainty_factors))
+        span.set_attribute("matchmind.tools_called",           tools_called if isinstance(tools_called, str) else ",".join(tools_called))
+        span.set_attribute("matchmind.tool_count",             len(tools_called.split(",")) if isinstance(tools_called, str) else len(tools_called))
 
         # ── Placeholder for actual result (filled by update_prediction_with_result) ─
         span.set_attribute("matchmind.actual_result",   "pending")
