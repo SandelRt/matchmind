@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
     _state["sessions"] = OrderedDict()
     logger.info("ADK agent + Runner initialized (model: %s)", config.GEMINI_MODEL)
 
-    gemini = genai.Client()
+    gemini = genai.Client(api_key=config.GOOGLE_API_KEY)
     evaluator = MatchPredictionEvaluator()
     analyzer = TraceFailureAnalyzer(phoenix_sync=sync)
     improvement_loop = SelfImprovementLoop(

@@ -1,4 +1,6 @@
 substitutions:
+  # _TAG: image tag for manual submits ($COMMIT_SHA is only set by triggers)
+  _TAG: latest
   _REGION: us-central1
   _SERVICE: matchmind
   _AR_REPO: matchmind-repo
@@ -9,14 +11,14 @@ steps:
     args:
       - build
       - -t
-      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:${_TAG}"
       - .
 
   # Push to Artifact Registry
   - name: "gcr.io/cloud-builders/docker"
     args:
       - push
-      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:${_TAG}"
 
   # Deploy to Cloud Run
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -25,7 +27,7 @@ steps:
       - run
       - deploy
       - ${_SERVICE}
-      - "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
+      - "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:${_TAG}"
       - "--region=${_REGION}"
       - --platform=managed
       - --allow-unauthenticated   # app-level auth via MATCHMIND_API_KEY (X-API-Key header)
@@ -34,4 +36,6 @@ steps:
       # Swap PredictionStore to Firestore before scaling out.
       - --min-instances=1
       - --max-instances=1
+      # Inject secrets from Secret Manager as env vars
+      - "--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest,PHOENIX_API_KEY=PHOENIX_API_KEY:latest,MATCHMIND_API_KEY=MATCHMIND_API_KEY:latest"
  

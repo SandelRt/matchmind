@@ -14,6 +14,9 @@ class Config:
     GOOGLE_CLOUD_PROJECT: str = field(
         default_factory=lambda: os.getenv("GOOGLE_CLOUD_PROJECT", "")
     )
+    GOOGLE_API_KEY: str = field(
+        default_factory=lambda: os.getenv("GOOGLE_API_KEY", "")
+    )
     GOOGLE_CLOUD_LOCATION: str = field(
         default_factory=lambda: os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     )
