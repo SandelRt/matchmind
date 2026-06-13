@@ -37,5 +37,5 @@ steps:
       - --min-instances=1
       - --max-instances=1
       # Inject secrets from Secret Manager as env vars
-      - "--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest,PHOENIX_API_KEY=PHOENIX_API_KEY:latest,MATCHMIND_API_KEY=MATCHMIND_API_KEY:latest"
+      - "--set-secrets=GOOGLE_API_KEY=google-api-key:latest,PHOENIX_API_KEY=phoenix-api-key:latest,MATCHMIND_API_KEY=matchmind-api-key:latest"
  
